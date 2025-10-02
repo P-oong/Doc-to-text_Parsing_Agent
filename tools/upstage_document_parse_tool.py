@@ -5,6 +5,7 @@ Upstage Document Parsing API를 사용한 문서 파싱
 
 import requests
 import os
+import json
 from pathlib import Path
 from typing import Dict, List, Any, Union
 
@@ -59,18 +60,21 @@ class UpstageDocumentParseTool:
             raise FileNotFoundError(f"PDF file not found: {pdf_path}")
         
         try:
+            print(f"[INFO] Upstage Document Parse 시작: {pdf_path.name}")
+            
             # PDF 파일을 바이너리로 읽기
             with open(pdf_path, 'rb') as f:
                 files = {"document": f}
                 headers = {"Authorization": f"Bearer {self.api_key}"}
                 
                 # API 파라미터 (document-parse 모델 사용)
+                # base64_encoding은 JSON 배열 문자열로 전달
                 data = {
                     "ocr": "auto",  # OCR 자동 감지
-                    "model": "document-parse",  # stable alias
-                    "base64_encoding": "['figure', 'chart', 'table', 'equation']",
-                    "merge_multipage_tables": "true"
+                    "model": "document-parse"  # stable alias
                 }
+                
+                print(f"[INFO] API 호출 중... (최대 120초 대기)")
                 
                 # API 호출
                 response = requests.post(
@@ -83,9 +87,19 @@ class UpstageDocumentParseTool:
                 
                 response.raise_for_status()
                 result = response.json()
+                
+                print(f"[INFO] API 응답 수신 완료")
+            
+            # 응답 구조 확인
+            if "elements" in result:
+                print(f"[INFO] elements 개수: {len(result['elements'])}")
+            else:
+                print(f"[WARNING] API 응답에 'elements' 필드가 없습니다. 응답 키: {list(result.keys())}")
             
             # 응답 파싱
             pages = self._parse_upstage_response(result)
+            
+            print(f"[INFO] 파싱 완료: {len(pages)}개 페이지")
             
             return {
                 "pages": pages,
@@ -116,15 +130,18 @@ class UpstageDocumentParseTool:
         pages = []
         
         # Document Parse API 응답 구조: elements 배열
-        if "elements" in response:
+        if "elements" in response and len(response["elements"]) > 0:
             # 엘리먼트 기반 파싱
             page_texts = {}
             page_bboxes = {}
             page_tables = {}
             
-            for element in response["elements"]:
+            print(f"[DEBUG] 처리할 elements: {len(response['elements'])}개")
+            
+            for idx, element in enumerate(response["elements"]):
                 page_num = element.get("page", 1)
-                category = element.get("category", "")
+                category = element.get("category", "text")
+                element_id = element.get("id", idx)
                 
                 if page_num not in page_texts:
                     page_texts[page_num] = []
@@ -133,33 +150,55 @@ class UpstageDocumentParseTool:
                 
                 # content 객체에서 텍스트 추출 (markdown → text → html 순)
                 content_obj = element.get("content", {})
-                text = (
-                    content_obj.get("markdown") or 
-                    content_obj.get("text") or 
-                    content_obj.get("html", "")
-                )
+                
+                # content가 문자열인 경우도 처리
+                if isinstance(content_obj, str):
+                    text = content_obj
+                elif isinstance(content_obj, dict):
+                    text = (
+                        content_obj.get("markdown") or 
+                        content_obj.get("text") or 
+                        content_obj.get("html", "")
+                    )
+                else:
+                    text = ""
                 
                 # 텍스트가 있으면 추가
                 if text and text.strip():
                     page_texts[page_num].append(text)
                     
-                    # 바운딩 박스 추가
+                    # 바운딩 박스 추가 (coordinates는 4개의 점 [{x, y}, {x, y}, {x, y}, {x, y}] 형식)
                     if "coordinates" in element:
-                        coords = element["coordinates"]
-                        if isinstance(coords, list) and len(coords) >= 4:
-                            # 좌표가 리스트 형태인 경우: [x, y, width, height]
-                            page_bboxes[page_num].append({
-                                "x0": coords[0].get("x", 0) if isinstance(coords[0], dict) else coords[0],
-                                "y0": coords[0].get("y", 0) if isinstance(coords[0], dict) else coords[1],
-                                "x1": coords[2].get("x", 0) if isinstance(coords[2], dict) else coords[2],
-                                "y1": coords[2].get("y", 0) if isinstance(coords[2], dict) else coords[3],
-                                "text": text[:100]  # 텍스트 일부만 저장
-                            })
+                        try:
+                            coords = element["coordinates"]
+                            if isinstance(coords, list) and len(coords) >= 4:
+                                # 좌표가 dict 리스트인 경우
+                                if isinstance(coords[0], dict):
+                                    x_coords = [c.get("x", 0) for c in coords if "x" in c]
+                                    y_coords = [c.get("y", 0) for c in coords if "y" in c]
+                                    
+                                    if x_coords and y_coords:
+                                        page_bboxes[page_num].append({
+                                            "x0": min(x_coords),
+                                            "y0": min(y_coords),
+                                            "x1": max(x_coords),
+                                            "y1": max(y_coords),
+                                            "text": text[:100]  # 텍스트 일부만 저장
+                                        })
+                                # 좌표가 숫자 리스트인 경우 [x0, y0, x1, y1]
+                                elif isinstance(coords[0], (int, float)):
+                                    page_bboxes[page_num].append({
+                                        "x0": coords[0],
+                                        "y0": coords[1],
+                                        "x1": coords[2],
+                                        "y1": coords[3],
+                                        "text": text[:100]
+                                    })
+                        except Exception as e:
+                            print(f"[WARNING] 좌표 파싱 오류 (element {element_id}): {e}")
                 
                 # 표 정보 추출
                 if category == "table":
-                    # 표는 이미 markdown이나 text로 변환되어 있음
-                    # 추가 메타데이터만 저장
                     page_tables[page_num].append({
                         "category": "table",
                         "text": text[:200],  # 표 내용 일부
@@ -168,25 +207,44 @@ class UpstageDocumentParseTool:
             
             # 페이지별로 정리
             for page_num in sorted(page_texts.keys()):
+                page_text = "\n\n".join(page_texts[page_num])
+                print(f"[DEBUG] 페이지 {page_num}: {len(page_text)} 문자, {len(page_bboxes[page_num])} bbox, {len(page_tables[page_num])} tables")
+                
                 pages.append({
                     "page": page_num,
-                    "text": "\n\n".join(page_texts[page_num]),  # 요소 간 구분을 위해 더블 줄바꿈
+                    "text": page_text,
                     "bbox": page_bboxes[page_num],
                     "tables": page_tables[page_num],
                     "width": 0,
                     "height": 0
                 })
         
-        # 응답이 비어있는 경우 기본값 반환
+        # 응답이 비어있는 경우
         if not pages:
-            pages = [{
-                "page": 1,
-                "text": "",
-                "bbox": [],
-                "tables": [],
-                "width": 0,
-                "height": 0
-            }]
+            print("[WARNING] 파싱된 페이지가 없습니다. 빈 페이지를 반환합니다.")
+            # 실제 페이지 수를 확인해서 빈 페이지들을 생성
+            if "usage" in response and "pages" in response["usage"]:
+                total_pages = response["usage"]["pages"]
+                pages = [
+                    {
+                        "page": i,
+                        "text": "",
+                        "bbox": [],
+                        "tables": [],
+                        "width": 0,
+                        "height": 0
+                    }
+                    for i in range(1, total_pages + 1)
+                ]
+            else:
+                pages = [{
+                    "page": 1,
+                    "text": "",
+                    "bbox": [],
+                    "tables": [],
+                    "width": 0,
+                    "height": 0
+                }]
         
         return pages
     
@@ -213,25 +271,52 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         test_pdf = sys.argv[1]
     else:
-        test_pdf = "C:\Users\Admin\agentserver\data\input\카카오뱅크_20240508_한화투자증권.pdf"
+        # 기본 테스트 파일 경로 (이스케이프 문제 방지를 위해 raw string 사용)
+        test_pdf = r"C:\Users\Admin\agentserver\data\input\카카오뱅크_20240508_한화투자증권.pdf"
     
-    if Path(test_pdf).exists():
+    test_path = Path(test_pdf)
+    
+    if test_path.exists():
         try:
-            tool = UpstageDocumentParseTool()
-            result = tool.extract(test_pdf)
+            print("="*80)
+            print("Upstage Document Parse Tool 테스트")
+            print("="*80)
             
-            print(f"[OK] Upstage Document Parse extraction completed")
-            print(f"Pages: {len(result['pages'])}")
+            tool = UpstageDocumentParseTool()
+            result = tool.extract(test_path)
+            
+            print("\n" + "="*80)
+            print("[OK] Upstage Document Parse extraction completed")
+            print("="*80)
+            print(f"총 페이지 수: {len(result['pages'])}")
+            
+            # 전체 통계
+            total_text_length = sum(len(p['text']) for p in result['pages'])
+            total_bboxes = sum(len(p['bbox']) for p in result['pages'])
+            total_tables = sum(len(p['tables']) for p in result['pages'])
+            
+            print(f"총 텍스트 길이: {total_text_length:,} 문자")
+            print(f"총 bbox 개수: {total_bboxes}")
+            print(f"총 표 개수: {total_tables}")
             
             if result['pages']:
+                print(f"\n첫 번째 페이지 미리보기:")
                 first_page = result['pages'][0]
-                print(f"\nFirst page preview:")
-                print(f"  Text length: {len(first_page['text'])} chars")
-                print(f"  Text sample: {first_page['text'][:200]}...")
-                print(f"  Bbox count: {len(first_page['bbox'])}")
-                print(f"  Tables: {len(first_page['tables'])}")
+                print(f"  페이지 번호: {first_page['page']}")
+                print(f"  텍스트 길이: {len(first_page['text'])} 문자")
+                if first_page['text']:
+                    preview = first_page['text'][:300].replace('\n', ' ')
+                    print(f"  텍스트 샘플: {preview}...")
+                else:
+                    print(f"  ⚠️ 텍스트가 비어있습니다!")
+                print(f"  Bbox 개수: {len(first_page['bbox'])}")
+                print(f"  표 개수: {len(first_page['tables'])}")
+            
+            print("\n" + "="*80)
         except Exception as e:
-            print(f"[ERROR] Test failed: {e}")
+            print(f"\n[ERROR] 테스트 실패: {e}")
+            import traceback
+            traceback.print_exc()
     else:
-        print(f"[ERROR] Test file not found: {test_pdf}")
+        print(f"[ERROR] 테스트 파일을 찾을 수 없습니다: {test_pdf}")
 

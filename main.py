@@ -7,15 +7,155 @@ import argparse
 import sys
 from pathlib import Path
 from datetime import datetime
-from typing import List
+from typing import List, Dict
 
 # 프로젝트 루트를 path에 추가
 sys.path.insert(0, str(Path(__file__).parent))
 
 import config
-from state import create_initial_document_state
+from state import create_initial_document_state, create_initial_refine_state
 from graph import create_processing_graph
+from refine_graph import create_refine_graph
 from utils.file_utils import ensure_directories, get_input_files
+
+
+def run_strategy_mode(input_files: List[Path], args) -> List[Dict]:
+    """파싱 전략 선택 모드 실행"""
+    
+    print(f"\n{'*'*80}")
+    print(f"SYSTEM A: OCR/Parsing Strategy Selection")
+    print(f"{'*'*80}\n")
+    
+    # LangGraph 그래프 생성
+    graph = create_processing_graph()
+    
+    results = []
+    
+    for idx, file_path in enumerate(input_files, 1):
+        print(f"\n{'#'*80}")
+        print(f"[{idx}/{len(input_files)}] {file_path.name}")
+        print(f"{'#'*80}\n")
+        
+        # 초기 상태 생성
+        state = create_initial_document_state(str(file_path))
+        
+        try:
+            # 그래프 실행
+            final_state = graph.invoke(state)
+            
+            # 결과 저장
+            results.append({
+                "mode": "strategy",
+                "file": file_path.name,
+                "status": final_state["current_stage"],
+                "final_selection": final_state.get("final_selection"),
+                "error_count": len(final_state.get("error_log", []))
+            })
+            
+            # 결과 출력
+            print(f"\n{'='*80}")
+            if final_state["current_stage"] == "completed":
+                print(f"[OK] Processing completed: {file_path.name}")
+                if final_state.get("final_selection"):
+                    selection = final_state["final_selection"]
+                    print(f"   Final strategy: {selection.selected_strategy}")
+                    print(f"   Score: {selection.S_total:.3f}")
+            else:
+                print(f"[FAIL] Processing failed: {file_path.name}")
+                print(f"   Status: {final_state['current_stage']}")
+                print(f"   Errors: {len(final_state.get('error_log', []))}")
+            print(f"{'='*80}\n")
+            
+        except Exception as e:
+            print(f"\n{'='*80}")
+            print(f"[FATAL ERROR] {file_path.name}")
+            print(f"   {str(e)}")
+            print(f"{'='*80}\n")
+            
+            import traceback
+            traceback.print_exc()
+            
+            results.append({
+                "mode": "strategy",
+                "file": file_path.name,
+                "status": "fatal_error",
+                "final_selection": None,
+                "error_count": 1
+            })
+    
+    return results
+
+
+def run_refine_mode(input_files: List[Path], args) -> List[Dict]:
+    """문서 정제 모드 실행"""
+    
+    print(f"\n{'*'*80}")
+    print(f"SYSTEM B: Document Refine")
+    print(f"{'*'*80}\n")
+    
+    # LangGraph 그래프 생성
+    graph = create_refine_graph()
+    
+    results = []
+    
+    for idx, file_path in enumerate(input_files, 1):
+        print(f"\n{'#'*80}")
+        print(f"[{idx}/{len(input_files)}] {file_path.name}")
+        print(f"{'#'*80}\n")
+        
+        # 초기 상태 생성
+        state = create_initial_refine_state(str(file_path), file_path.name)
+        
+        try:
+            # 그래프 실행
+            final_state = graph.invoke(state)
+            
+            # 결과 저장
+            refine_report = final_state.get("refine_report")
+            
+            results.append({
+                "mode": "refine",
+                "file": file_path.name,
+                "status": final_state["current_stage"],
+                "pages_refined": refine_report.pages_refined if refine_report else 0,
+                "total_pages": refine_report.total_pages if refine_report else 0,
+                "error_count": len(final_state.get("error_log", []))
+            })
+            
+            # 결과 출력
+            print(f"\n{'='*80}")
+            if final_state["current_stage"] == "complete":
+                print(f"[OK] Refine completed: {file_path.name}")
+                if refine_report:
+                    print(f"   Total pages: {refine_report.total_pages}")
+                    print(f"   Pages refined: {refine_report.pages_refined}")
+                    print(f"   Pages skipped: {refine_report.pages_skipped}")
+                    print(f"   LLM cost: ${refine_report.total_llm_cost_usd:.4f}")
+            else:
+                print(f"[FAIL] Refine failed: {file_path.name}")
+                print(f"   Status: {final_state['current_stage']}")
+                print(f"   Errors: {len(final_state.get('error_log', []))}")
+            print(f"{'='*80}\n")
+            
+        except Exception as e:
+            print(f"\n{'='*80}")
+            print(f"[FATAL ERROR] {file_path.name}")
+            print(f"   {str(e)}")
+            print(f"{'='*80}\n")
+            
+            import traceback
+            traceback.print_exc()
+            
+            results.append({
+                "mode": "refine",
+                "file": file_path.name,
+                "status": "fatal_error",
+                "pages_refined": 0,
+                "total_pages": 0,
+                "error_count": 1
+            })
+    
+    return results
 
 
 def main():
@@ -24,6 +164,14 @@ def main():
     # 인자 파싱
     parser = argparse.ArgumentParser(
         description="LangGraph 기반 Doc-to-Text 멀티 에이전트 시스템"
+    )
+    
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["strategy", "refine", "both"],
+        default="strategy",
+        help="실행 모드: strategy (파싱 전략 선택), refine (문서 정제), both (둘 다)"
     )
     
     parser.add_argument(
@@ -43,7 +191,7 @@ def main():
         type=str,
         choices=["extraction", "validation", "judge", "all"],
         default="all",
-        help="실행할 단계 (기본값: all)"
+        help="실행할 단계 (strategy 모드에서만 사용, 기본값: all)"
     )
     
     parser.add_argument(
@@ -79,65 +227,24 @@ def main():
     print(f"\n{'='*80}")
     print(f"Doc-to-Text Multi-Agent System")
     print(f"{'='*80}")
+    print(f"[INFO] Mode: {args.mode}")
     print(f"[INFO] Input Files: {len(input_files)}")
-    print(f"[INFO] Stage: {args.stage}")
+    if args.mode == "strategy":
+        print(f"[INFO] Stage: {args.stage}")
     print(f"{'='*80}\n")
     
-    # LangGraph 그래프 생성
-    graph = create_processing_graph()
-    
-    # 각 문서 처리
+    # 모드에 따라 처리
     results = []
     
-    for idx, file_path in enumerate(input_files, 1):
-        print(f"\n{'#'*80}")
-        print(f"[{idx}/{len(input_files)}] {file_path.name}")
-        print(f"{'#'*80}\n")
-        
-        # 초기 상태 생성
-        state = create_initial_document_state(str(file_path))
-        
-        try:
-            # 그래프 실행
-            final_state = graph.invoke(state)
-            
-            # 결과 저장
-            results.append({
-                "file": file_path.name,
-                "status": final_state["current_stage"],
-                "final_selection": final_state.get("final_selection"),
-                "error_count": len(final_state.get("error_log", []))
-            })
-            
-            # 결과 출력
-            print(f"\n{'='*80}")
-            if final_state["current_stage"] == "completed":
-                print(f"[OK] Processing completed: {file_path.name}")
-                if final_state.get("final_selection"):
-                    selection = final_state["final_selection"]
-                    print(f"   Final strategy: {selection.selected_strategy}")
-                    print(f"   Score: {selection.S_total:.3f}")
-            else:
-                print(f"[FAIL] Processing failed: {file_path.name}")
-                print(f"   Status: {final_state['current_stage']}")
-                print(f"   Errors: {len(final_state.get('error_log', []))}")
-            print(f"{'='*80}\n")
-            
-        except Exception as e:
-            print(f"\n{'='*80}")
-            print(f"[FATAL ERROR] {file_path.name}")
-            print(f"   {str(e)}")
-            print(f"{'='*80}\n")
-            
-            import traceback
-            traceback.print_exc()
-            
-            results.append({
-                "file": file_path.name,
-                "status": "fatal_error",
-                "final_selection": None,
-                "error_count": 1
-            })
+    if args.mode == "strategy":
+        results = run_strategy_mode(input_files, args)
+    elif args.mode == "refine":
+        results = run_refine_mode(input_files, args)
+    elif args.mode == "both":
+        print("[INFO] Running both modes sequentially...\n")
+        strategy_results = run_strategy_mode(input_files, args)
+        refine_results = run_refine_mode(input_files, args)
+        results = strategy_results + refine_results
     
     # 전체 결과 요약
     print(f"\n{'='*80}")

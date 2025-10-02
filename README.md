@@ -6,25 +6,33 @@
 
 ## 프로젝트 개요
 
-PDF 문서에 대해 **최적의 파싱 전략을 자동으로 선택**하고, 그 과정과 결과를 상세히 리포팅하는 LangGraph 기반 멀티 에이전트 시스템입니다.
+PDF 문서에 대해 **최적의 파싱 전략 선택**과 **문서 정제**를 수행하는 **두 개의 독립적인 LangGraph 기반 멀티 에이전트 시스템**입니다.
 
-### 핵심 목표
-- 문서별로 최적의 파싱 도구/전략 선택
-- 3단계 에이전트 파이프라인 (다중추출 → 검증+폴백 → LLM 평가)
-- Solar LLM 기반 유효성 검증 및 품질 평가
-- 상세한 리포트 생성 (JSON, CSV)
+### 🎯 두 가지 멀티 에이전트 시스템
 
-### 주요 특징
-- **5개 도구 동시 추출**: 로컬 라이브러리 3개 + Upstage API 2개
-- **페이지 샘플링**: 전체 페이지 중 랜덤 5페이지 추출 (5페이지 미만은 전체)
-- **LLM 기반 검증**: Solar API를 통한 텍스트 품질 검증 (Pass/Fail)
+#### 1️⃣ **OCR/파싱 전략 선택 시스템**
+여러 파싱 도구 중 **최적의 전략을 자동으로 선택**하고 품질·비용까지 평가
+- 5개 도구 동시 추출 (로컬 3개 + API 2개)
+- 3단계 에이전트: 추출 → 검증+폴백 → LLM 평가
+- 최종 전략 선택 및 리포트 생성
+
+#### 2️⃣ **문서 정제(Refine) 시스템** 🆕
+파싱된 문서가 **정제가 필요한지 판단** → 필요 시 자동 정제
+- 정제 필요 여부 검증 (Need Refine / No Refine)
+- 필요 시에만 정제 처리 (문장 재구성, 노이즈 제거 등)
+- 원본 vs 정제본 비교 리포트
+
+### 핵심 특징
+- **병렬 처리**: 5개 도구 동시 추출로 효율성 극대화
+- **페이지 샘플링**: 랜덤 5페이지 추출로 비용 절감
+- **LLM 기반 검증**: Solar API를 통한 지능형 Pass/Fail 판단
 - **지능형 폴백**: 실패 시 자동으로 다양한 도구 조합 시도
 - **비용 추적**: Upstage API 사용 시 페이지당 비용 자동 계산
-- **타임스탬프 저장**: 실행마다 고유한 CSV 파일 생성
+- **타임스탬프 저장**: 실행마다 고유한 파일명으로 이력 관리
 
 ---
 
-## 🏗️ 멀티 에이전트 시스템 구조도
+## 🏗️ 시스템 A: OCR/파싱 전략 선택 멀티 에이전트
 
 ```mermaid
 graph TB
@@ -124,7 +132,100 @@ graph TB
 
 ---
 
+## 🏗️ 시스템 B: 문서 정제(Refine) 멀티 에이전트 🆕
+
+```mermaid
+graph TB
+    Start([PDF 문서 입력]) --> Agent1
+    
+    subgraph Stage1["1단계: 기본 추출 Agent (동일)"]
+        Agent1[BasicExtractionAgent]
+        Tool1[PDFPlumber<br/>무료]
+        Tool2[PDFMiner<br/>무료]
+        Tool3[PyPDFium2<br/>무료]
+        Tool4[Upstage OCR API<br/>$0.0015/page]
+        Tool5[Upstage Document Parse<br/>$0.01/page]
+        
+        Agent1 --> Tool1
+        Agent1 --> Tool2
+        Agent1 --> Tool3
+        Agent1 --> Tool4
+        Agent1 --> Tool5
+    end
+    
+    Tool1 --> Agent2
+    Tool2 --> Agent2
+    Tool3 --> Agent2
+    Tool4 --> Agent2
+    Tool5 --> Agent2
+    
+    subgraph Stage2["2단계: 정제 필요 여부 검증 Agent"]
+        Agent2[RefineValidationAgent<br/>On-device LLM]
+        Decision{정제 필요<br/>여부?}
+        
+        Agent2 --> Decision
+    end
+    
+    Decision -->|Need Refine| Agent3
+    Decision -->|No Refine| Skip[정제 불필요<br/>원본 사용]
+    
+    subgraph Stage3["3단계: 문서 정제 Agent"]
+        Agent3[RefineAgent<br/>Solar LLM]
+        Refine["문장 다듬기·노이즈 제거·표·리스트 개선·문단 정리"]
+        
+        Agent3 --> Refine
+    end
+    
+    Refine --> End([정제 완료])
+    Skip --> End
+    
+    style Agent1 fill:#e1f5ff
+    style Agent2 fill:#fff4e1
+    style Agent3 fill:#ffe1f5
+    style Tool4 fill:#ffd700
+    style Tool5 fill:#ffd700
+    style Skip fill:#f0f0f0
+```
+
+### 데이터 흐름
+
+```
+📄 PDF 입력
+    ↓
+┌─────────────────────────────────────────────────────────┐
+│ 1단계: 5개 도구로 동시 추출 (페이지 샘플링)             │
+│  • pdfplumber, pdfminer, pypdfium2 (로컬)               │
+│  • upstage_ocr, upstage_document_parse (API)            │
+└─────────────────────────────────────────────────────────┘
+    ↓ (추출된 텍스트)
+┌─────────────────────────────────────────────────────────┐
+│ 2단계: On-device LLM 정제 필요 여부 검증                │
+│  판단 기준:                                             │
+│    • 줄바꿈/띄어쓰기 오류                               │
+│    • 헤더·푸터·페이지번호 노이즈                        │
+│    • 표·목차/본문 뒤섞임                                │
+│    • 특수문자/인코딩 오류                               │
+│  결과: Need Refine / No Refine                          │
+└─────────────────────────────────────────────────────────┘
+    ↓
+┌──────────────────────────────────────────────────────────┐    ┌──────────────────────────┐
+│ Need Refine                                              │    │ No Refine                │
+│  ↓                                                       │    │  → 원본 그대로 사용      │
+│ 3단계: 문장 다듬기·노이즈 제거·표·리스트 개선·문단 정리 │    └──────────────────────────┘
+└──────────────────────────────────────────────────────────┘              │
+    ↓                                  │
+    └──────────────┬───────────────────┘
+                   ↓
+✅ 정제 완료 + 자동 리포트 생성
+📊 refine_report.json
+📄 refine_log_YYYYMMDD_HHMMSS.csv
+```
+
+---
+
 ## 시스템 흐름
+
+### 📌 시스템 A: OCR/파싱 전략 선택
 
 #### 1단계: 기본 추출 (Multi-Tool Extraction)
 - **도구**: 
@@ -180,9 +281,42 @@ graph TB
 
 ---
 
+### 📌 시스템 B: 문서 정제(Refine) 🆕
+
+#### 1단계: 기본 추출 (동일)
+- **시스템 A와 동일한 추출 프로세스**
+- 5개 도구로 동시 추출 및 페이지 샘플링
+
+#### 2단계: 정제 필요 여부 검증
+- **On-device LLM 기반 검증**: 문서가 정제가 필요한지 판단
+- **판단 기준**:
+  - 줄바꿈/띄어쓰기 오류 여부
+  - 헤더·푸터·페이지번호 노이즈
+  - 표·목차/본문 뒤섞임
+  - 특수문자/인코딩 오류
+  - 문단 구조 불일치
+- **결과**: Need Refine / No Refine
+
+#### 3단계: 문서 정제 (Need Refine인 경우만)
+- **Solar LLM 기반 정제**: 문서 텍스트 자동 정제
+- **정제 작업**:
+  - 문장 재구성 (줄바꿈, 띄어쓰기 수정)
+  - 불필요한 노이즈 제거 (헤더/푸터/페이지번호)
+  - 표/리스트 구조 개선
+  - 일관된 문단 단위 분리
+  - 특수문자 정규화
+- **산출**: 원본 텍스트 + 정제된 텍스트 + 자동 리포트 생성
+  - `refine_report.json`: 정제 전/후 비교
+  - `refine_log_YYYYMMDD_HHMMSS.csv`: 페이지별 정제 기록
+  - 타임스탬프로 이력 관리
+
+---
+
 ## 주요 기능
 
-### 1. 기본 추출 (Basic Extraction Agent)
+### 📌 시스템 A: OCR/파싱 전략 선택
+
+#### 1. 기본 추출 (Basic Extraction Agent)
 - **5개 도구 동시 추출**:
   - **로컬 라이브러리** (무료): PDFPlumber, PDFMiner, PyPDFium2
   - **Upstage API**: OCR API, Document Parse API
@@ -192,7 +326,7 @@ graph TB
 - 각 도구별 독립적인 추출 결과 생성
 - **API 비용 자동 계산**: Upstage API 사용 시 페이지당 비용 추적
 
-### 2. 유효성 검증 + 폴백 (Validation Agent)
+#### 2. 유효성 검증 + 폴백 (Validation Agent)
 - **Solar LLM 기반 검증**: 페이지별 텍스트 품질 평가 (Pass/Fail)
   - 읽기 순서 정확성
   - 문장 완결성
@@ -205,7 +339,7 @@ graph TB
   - **Table Enhancement**: 표 구조 개선
 - **자동 재시도**: Fail 시 단일 도구 → 2개 조합 순차 적용 후 재검증
 
-### 3. LLM Judge (Judge Agent)
+#### 3. LLM Judge (Judge Agent)
 - **Upstage Solar pro2** 기반 품질 평가 (Pass된 전략만 평가)
 - **5개 축 점수화** (각 0-10점):
   - S_read: 읽기 순서 정확성
@@ -219,7 +353,7 @@ graph TB
   - 7.0점 미만: fail 등급
 - **선정 전략**: S_total 최우선 → 동점 시 처리 속도 고려
 
-### 4. 자동 리포트 생성
+#### 4. 자동 리포트 생성
 3단계 완료 후 평가 결과가 자동으로 리포트 파일로 저장됩니다:
 - **judge_report.json**: 상세 평가 내역 (페이지별 결과 포함)
 - **page_level_results_YYYYMMDD_HHMMSS.csv**: 페이지별 상세 결과
@@ -231,6 +365,41 @@ graph TB
   - 페이지별 최선 선택 (1/0)
 - **final_selection_YYYYMMDD_HHMMSS.csv**: 문서별 최종 선택 전략
 - **타임스탬프**: 실행마다 고유한 파일명으로 저장되어 이전 결과 보존
+
+### 📌 시스템 B: 문서 정제(Refine) 🆕
+
+#### 1. 정제 필요 여부 검증 (Refine Validation Agent)
+- **On-device LLM 기반 검증**: 문서가 정제가 필요한지 자동 판단
+- **판단 기준**:
+  - 줄바꿈/띄어쓰기 오류
+  - 헤더·푸터·페이지번호 노이즈
+  - 표·목차/본문 뒤섞임
+  - 특수문자/인코딩 오류
+  - 문단 구조 불일치
+- **결과**: Need Refine / No Refine (페이지별)
+
+#### 2. 문서 정제 (Refine Agent)
+- **Need Refine인 경우만 실행**
+- **Solar LLM 기반 정제**:
+  - 문장 재구성 (줄바꿈, 띄어쓰기)
+  - 노이즈 제거 (헤더/푸터/페이지번호)
+  - 표/리스트 구조 개선
+  - 문단 단위 분리
+  - 특수문자 정규화
+- **No Refine인 경우**: 원본 그대로 사용
+- **산출**: 원본 + 정제본 모두 보존
+
+#### 3. 자동 리포트 생성
+3단계 완료 후 정제 결과가 자동으로 리포트 파일로 저장됩니다:
+- **refine_report.json**: 전체 정제 결과
+  - 문서별/페이지별 정제 여부
+  - 정제 전/후 텍스트 비교
+  - 정제 비용·시간 추적
+- **refine_log_YYYYMMDD_HHMMSS.csv**: 페이지별 상세 기록
+  - 페이지 번호, 정제 필요 여부
+  - 원본 텍스트 / 정제된 텍스트
+  - 정제 사유, 처리 시간, LLM 비용
+- **타임스탬프**: 실행마다 고유한 파일명으로 저장
 
 ---
 
@@ -246,10 +415,13 @@ agentserver/
 │       ├── reports/        # judge_report.json
 │       └── tables/         # CSV 리포트 (타임스탬프 포함)
 ├── agents/
-│   ├── basic_extraction_agent.py    # 다중 도구 추출
-│   ├── validation_agent.py          # LLM 검증 + 폴백
-│   ├── judge_agent.py               # LLM 품질 평가
-│   └── report_generator.py          # 자동 리포트 생성 (유틸리티)
+│   ├── basic_extraction_agent.py    # 다중 도구 추출 (공통)
+│   ├── validation_agent.py          # LLM 검증 + 폴백 (시스템 A)
+│   ├── judge_agent.py               # LLM 품질 평가 (시스템 A)
+│   ├── report_generator.py          # 자동 리포트 생성 (시스템 A)
+│   ├── refine_validation_agent.py   # 정제 필요 여부 검증 (시스템 B)
+│   ├── refine_agent.py              # 문서 정제 (시스템 B)
+│   └── refine_report_agent.py       # 정제 리포트 생성 (시스템 B)
 ├── tools/
 │   ├── pdfplumber_tool.py           # PDFPlumber 추출
 │   ├── pdfminer_tool.py             # PDFMiner 추출
@@ -264,12 +436,14 @@ agentserver/
 │   ├── metrics.py          # 유효성 검증 메트릭 (참고용)
 │   └── file_utils.py
 ├── prompts/
-│   ├── validation_prompts.py        # 2단계 검증 프롬프트
-│   └── judge_prompts.py             # 3단계 평가 프롬프트
-├── state.py                # LangGraph 상태 정의
+│   ├── validation_prompts.py        # 시스템 A 검증 프롬프트
+│   ├── judge_prompts.py             # 시스템 A 평가 프롬프트
+│   └── refine_prompts.py            # 시스템 B 정제 프롬프트
+├── state.py                # LangGraph 상태 정의 (A/B 공통)
 ├── config.py               # 설정 (API키, 임계값, 비용 등)
-├── graph.py                # LangGraph 워크플로우
-├── main.py                 # 실행 진입점
+├── graph.py                # 시스템 A 워크플로우
+├── refine_graph.py         # 시스템 B 워크플로우
+├── main.py                 # 실행 진입점 (모드 선택)
 ├── requirements.txt        # 의존성 패키지
 └── README.md
 ```
@@ -321,12 +495,14 @@ API 키는 [Upstage Console](https://console.upstage.ai/)에서 발급받을 수
 
 ### 4. 실행
 
+#### 시스템 A: OCR/파싱 전략 선택 (기본)
+
 ```bash
-# 기본 실행 (data/input/ 폴더의 모든 PDF 처리)
-python main.py
+# 기본 실행 (시스템 A)
+python main.py --mode strategy
 
 # 특정 파일 지정
-python main.py --input data/input/example.pdf
+python main.py --mode strategy --input data/input/example.pdf
 ```
 
 **실행 흐름:**
@@ -336,6 +512,40 @@ python main.py --input data/input/example.pdf
 4. Fail 페이지에 대해 폴백 도구 적용 및 재검증
 5. Pass된 페이지에 대해 LLM Judge 품질 평가
 6. 최종 전략 자동 선택 및 리포트 생성
+
+#### 시스템 B: 문서 정제 🆕
+
+```bash
+# 문서 정제 실행
+python main.py --mode refine
+
+# 특정 파일 지정
+python main.py --mode refine --input data/input/example.pdf
+```
+
+**실행 흐름:**
+1. 입력 PDF 로드 및 페이지 샘플링 (5페이지)
+2. 5개 도구로 동시 추출
+3. 페이지별 정제 필요 여부 검증 (Need Refine / No Refine)
+4. Need Refine인 페이지만 정제 처리
+5. 정제 리포트 생성 (원본 vs 정제본 비교)
+
+#### 두 시스템 모두 실행
+
+```bash
+# 전략 선택 → 문서 정제 순차 실행
+python main.py --mode both
+```
+
+#### 기타 옵션
+
+```bash
+# 특정 디렉토리의 모든 PDF 처리
+python main.py --mode strategy --input-dir data/input/
+
+# 디버그 모드
+python main.py --mode refine --debug
+```
 
 ---
 

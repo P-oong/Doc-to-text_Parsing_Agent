@@ -24,7 +24,8 @@ class UpstageDocumentParseTool:
         if not self.api_key:
             raise ValueError("SOLAR_API_KEY not found in environment variables")
         
-        self.api_url = "https://api.upstage.ai/v1/document-ai/document-parse"
+        # 올바른 API 엔드포인트
+        self.api_url = "https://api.upstage.ai/v1/document-digitization"
     
     def get_version(self) -> str:
         """도구 버전 반환"""
@@ -63,10 +64,12 @@ class UpstageDocumentParseTool:
                 files = {"document": f}
                 headers = {"Authorization": f"Bearer {self.api_key}"}
                 
-                # API 파라미터
+                # API 파라미터 (document-parse 모델 사용)
                 data = {
                     "ocr": "auto",  # OCR 자동 감지
-                    "output_formats": ["text", "html"],
+                    "model": "document-parse",  # stable alias
+                    "base64_encoding": "['figure', 'chart', 'table', 'equation']",
+                    "merge_multipage_tables": "true"
                 }
                 
                 # API 호출
@@ -112,8 +115,7 @@ class UpstageDocumentParseTool:
         """
         pages = []
         
-        # Upstage Document Parse 응답 구조에 따라 파싱
-        # 실제 API 응답 구조에 맞게 수정 필요
+        # Document Parse API 응답 구조: elements 배열
         if "elements" in response:
             # 엘리먼트 기반 파싱
             page_texts = {}
@@ -122,77 +124,71 @@ class UpstageDocumentParseTool:
             
             for element in response["elements"]:
                 page_num = element.get("page", 1)
+                category = element.get("category", "")
                 
                 if page_num not in page_texts:
                     page_texts[page_num] = []
                     page_bboxes[page_num] = []
                     page_tables[page_num] = []
                 
-                # 텍스트 추출
-                if element.get("type") in ["text", "paragraph", "heading"]:
-                    page_texts[page_num].append(element.get("content", ""))
-                    
-                    # 바운딩 박스
-                    if "coordinates" in element:
-                        coord = element["coordinates"]
-                        page_bboxes[page_num].append({
-                            "x0": coord.get("x", 0),
-                            "y0": coord.get("y", 0),
-                            "x1": coord.get("x", 0) + coord.get("width", 0),
-                            "y1": coord.get("y", 0) + coord.get("height", 0),
-                            "text": element.get("content", "")
-                        })
+                # content 객체에서 텍스트 추출 (markdown → text → html 순)
+                content_obj = element.get("content", {})
+                text = (
+                    content_obj.get("markdown") or 
+                    content_obj.get("text") or 
+                    content_obj.get("html", "")
+                )
                 
-                # 표 추출
-                elif element.get("type") == "table":
-                    table_data = element.get("table", {})
+                # 텍스트가 있으면 추가
+                if text and text.strip():
+                    page_texts[page_num].append(text)
+                    
+                    # 바운딩 박스 추가
+                    if "coordinates" in element:
+                        coords = element["coordinates"]
+                        if isinstance(coords, list) and len(coords) >= 4:
+                            # 좌표가 리스트 형태인 경우: [x, y, width, height]
+                            page_bboxes[page_num].append({
+                                "x0": coords[0].get("x", 0) if isinstance(coords[0], dict) else coords[0],
+                                "y0": coords[0].get("y", 0) if isinstance(coords[0], dict) else coords[1],
+                                "x1": coords[2].get("x", 0) if isinstance(coords[2], dict) else coords[2],
+                                "y1": coords[2].get("y", 0) if isinstance(coords[2], dict) else coords[3],
+                                "text": text[:100]  # 텍스트 일부만 저장
+                            })
+                
+                # 표 정보 추출
+                if category == "table":
+                    # 표는 이미 markdown이나 text로 변환되어 있음
+                    # 추가 메타데이터만 저장
                     page_tables[page_num].append({
-                        "rows": len(table_data.get("rows", [])),
-                        "cols": len(table_data.get("rows", [[]])[0]) if table_data.get("rows") else 0,
-                        "data": table_data.get("rows", [])
+                        "category": "table",
+                        "text": text[:200],  # 표 내용 일부
+                        "has_base64": "base64_encoding" in element
                     })
             
             # 페이지별로 정리
             for page_num in sorted(page_texts.keys()):
                 pages.append({
                     "page": page_num,
-                    "text": "\n".join(page_texts[page_num]),
+                    "text": "\n\n".join(page_texts[page_num]),  # 요소 간 구분을 위해 더블 줄바꿈
                     "bbox": page_bboxes[page_num],
                     "tables": page_tables[page_num],
                     "width": 0,
                     "height": 0
                 })
         
-        # 단순 텍스트 응답인 경우
-        elif "content" in response:
-            pages.append({
+        # 응답이 비어있는 경우 기본값 반환
+        if not pages:
+            pages = [{
                 "page": 1,
-                "text": response["content"].get("text", ""),
+                "text": "",
                 "bbox": [],
                 "tables": [],
                 "width": 0,
                 "height": 0
-            })
+            }]
         
-        # HTML 파싱
-        elif "html" in response:
-            # HTML을 텍스트로 변환 (간단한 처리)
-            import re
-            html_text = response["html"]
-            # HTML 태그 제거
-            text = re.sub(r'<[^>]+>', ' ', html_text)
-            text = re.sub(r'\s+', ' ', text).strip()
-            
-            pages.append({
-                "page": 1,
-                "text": text,
-                "bbox": [],
-                "tables": [],
-                "width": 0,
-                "height": 0
-            })
-        
-        return pages if pages else [{"page": 1, "text": "", "bbox": [], "tables": [], "width": 0, "height": 0}]
+        return pages
     
     def process(self, pages: List[Dict], document_path: str) -> List[Dict]:
         """
@@ -217,7 +213,7 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         test_pdf = sys.argv[1]
     else:
-        test_pdf = "../fin_pdf_files/카카오뱅크_20240508_한화투자증권.pdf"
+        test_pdf = "C:\Users\Admin\agentserver\data\input\카카오뱅크_20240508_한화투자증권.pdf"
     
     if Path(test_pdf).exists():
         try:

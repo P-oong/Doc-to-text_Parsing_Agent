@@ -303,3 +303,150 @@ def update_stage(state: DocumentState, stage: str) -> DocumentState:
     state["current_stage"] = stage
     return state
 
+
+# ============================================================
+# 문서 정제(Refine) 시스템 전용 상태 타입
+# ============================================================
+
+@dataclass
+class PageRefineValidationResult:
+    """페이지별 정제 필요 여부 검증 결과"""
+    page_num: int  # 페이지 번호
+    extraction_id: str  # 연결된 추출 결과 ID
+    strategy: str  # 적용된 전략
+    need_refine: bool  # 정제 필요 여부
+    
+    # 판단 근거
+    issues: Dict[str, bool] = field(default_factory=dict)  # 발견된 문제들
+    # {
+    #   "line_break_errors": True,
+    #   "header_footer_noise": True,
+    #   "mixed_content": False,
+    #   "encoding_errors": False,
+    #   "paragraph_structure": True
+    # }
+    
+    confidence: float = 0.0  # 판단 신뢰도 (0~1)
+    reason: str = ""  # 판단 사유
+    
+    llm_response: Dict[str, Any] = field(default_factory=dict)  # LLM 원본 응답
+    processing_time_ms: float = 0.0
+    llm_cost_usd: float = 0.0
+    timestamp: datetime = field(default_factory=datetime.now)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class PageRefineResult:
+    """페이지별 정제 결과"""
+    page_num: int  # 페이지 번호
+    extraction_id: str  # 연결된 추출 결과 ID
+    strategy: str  # 적용된 전략
+    
+    original_text: str  # 원본 텍스트
+    refined_text: Optional[str] = None  # 정제된 텍스트 (정제하지 않은 경우 None)
+    need_refine: bool = False  # 정제 필요 여부
+    refined: bool = False  # 실제로 정제했는지 여부
+    
+    # 정제 작업 내용
+    refine_actions: List[str] = field(default_factory=list)  # 수행된 정제 작업들
+    # ["sentence_reconstruction", "noise_removal", "table_improvement", "paragraph_separation"]
+    
+    # 통계
+    character_diff: int = 0  # 원본 대비 글자 수 차이
+    improvements: Dict[str, Any] = field(default_factory=dict)  # 개선 사항
+    
+    llm_response: Dict[str, Any] = field(default_factory=dict)  # LLM 원본 응답
+    processing_time_ms: float = 0.0
+    llm_cost_usd: float = 0.0
+    timestamp: datetime = field(default_factory=datetime.now)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RefineReport:
+    """문서 정제 리포트"""
+    document_name: str
+    strategy: str  # 적용된 추출 전략
+    
+    # 전체 통계
+    total_pages: int = 0
+    pages_need_refine: int = 0  # 정제 필요 페이지 수
+    pages_refined: int = 0  # 실제 정제된 페이지 수
+    pages_skipped: int = 0  # 정제 불필요 페이지 수
+    
+    # 페이지별 결과
+    validation_results: List[PageRefineValidationResult] = field(default_factory=list)
+    refine_results: List[PageRefineResult] = field(default_factory=list)
+    
+    # 비용/시간
+    total_processing_time_ms: float = 0.0
+    total_llm_cost_usd: float = 0.0
+    
+    # 리포트 경로
+    report_json_path: Optional[str] = None
+    report_csv_path: Optional[str] = None
+    
+    timestamp: datetime = field(default_factory=datetime.now)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+class RefineDocumentState(TypedDict, total=False):
+    """문서 정제 시스템 상태"""
+    # 기본 정보
+    document_path: str
+    document_name: str
+    
+    # 1단계: 추출 결과 (시스템 A와 공유)
+    extraction_results: List[ExtractionResult]
+    
+    # 2단계: 정제 필요 여부 검증 결과
+    refine_validation_results: List[PageRefineValidationResult]
+    
+    # 3단계: 정제 결과
+    refine_results: List[PageRefineResult]
+    
+    # 4단계: 최종 리포트
+    refine_report: Optional[RefineReport]
+    
+    # 메타
+    doc_meta: Dict[str, Any]
+    current_stage: str  # "extraction", "refine_validation", "refine", "report"
+    error_log: List[Dict[str, Any]]
+    timestamp: datetime
+
+
+# 헬퍼 함수들
+
+def add_refine_validation_result(state: RefineDocumentState, result: PageRefineValidationResult) -> RefineDocumentState:
+    """정제 검증 결과 추가"""
+    state["refine_validation_results"].append(result)
+    return state
+
+
+def add_refine_result(state: RefineDocumentState, result: PageRefineResult) -> RefineDocumentState:
+    """정제 결과 추가"""
+    state["refine_results"].append(result)
+    return state
+
+
+def set_refine_report(state: RefineDocumentState, report: RefineReport) -> RefineDocumentState:
+    """정제 리포트 설정"""
+    state["refine_report"] = report
+    return state
+
+
+def create_initial_refine_state(document_path: str, document_name: str) -> RefineDocumentState:
+    """초기 정제 상태 생성"""
+    return RefineDocumentState(
+        document_path=document_path,
+        document_name=document_name,
+        extraction_results=[],
+        refine_validation_results=[],
+        refine_results=[],
+        refine_report=None,
+        doc_meta={},
+        current_stage="extraction",
+        error_log=[],
+        timestamp=datetime.now()
+    )

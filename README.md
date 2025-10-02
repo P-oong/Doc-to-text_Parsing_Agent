@@ -10,7 +10,7 @@ PDF 문서에 대해 **최적의 파싱 전략을 자동으로 선택**하고, �
 
 ### 핵심 목표
 - 문서별로 최적의 파싱 도구/전략 선택
-- 4단계 에이전트 파이프라인 (다중추출 → 검증+폴백 → LLM 평가 → 리포트)
+- 3단계 에이전트 파이프라인 (다중추출 → 검증+폴백 → LLM 평가)
 - Solar LLM 기반 유효성 검증 및 품질 평가
 - 상세한 리포트 생성 (JSON, CSV)
 
@@ -78,27 +78,11 @@ graph TB
         Agent3 --> Score
     end
     
-    Score --> Agent4
-    
-    subgraph Stage4["4단계: 리포트 생성 Agent"]
-        Agent4[ReportGenerator]
-        Report1[judge_report.json]
-        Report2[page_level_results.csv]
-        Report3[final_selection.csv]
-        
-        Agent4 --> Report1
-        Agent4 --> Report2
-        Agent4 --> Report3
-    end
-    
-    Report1 --> End([최종 리포트])
-    Report2 --> End
-    Report3 --> End
+    Score --> End([최종 선택 완료])
     
     style Agent1 fill:#e1f5ff
     style Agent2 fill:#fff4e1
     style Agent3 fill:#ffe1f5
-    style Agent4 fill:#e1ffe1
     style Tool4 fill:#ffd700
     style Tool5 fill:#ffd700
 ```
@@ -131,15 +115,11 @@ graph TB
 │  • S_read, S_sent, S_noise, S_table, S_fig → S_total   │
 │  • 최고 점수 전략 선택 (동점 시 속도 우선)              │
 └─────────────────────────────────────────────────────────┘
-    ↓ (최종 선택 전략)
-┌─────────────────────────────────────────────────────────┐
-│ 4단계: 리포트 생성                                       │
-│  • judge_report.json (상세 평가)                        │
-│  • page_level_results_YYYYMMDD_HHMMSS.csv (페이지별)    │
-│  • final_selection_YYYYMMDD_HHMMSS.csv (최종 선택)      │
-└─────────────────────────────────────────────────────────┘
     ↓
-📊 최종 리포트 출력
+✅ 최종 선택 완료 + 자동 리포트 생성
+📊 judge_report.json
+📄 page_level_results_YYYYMMDD_HHMMSS.csv
+📈 final_selection_YYYYMMDD_HHMMSS.csv
 ```
 
 ---
@@ -189,25 +169,14 @@ graph TB
 - **등급 기준**:
   - 8.5점 이상: pass 등급
   - 7.0-8.4점: borderline 등급
-  - 7.0점 미만: fail 등급## 🏗️ 멀티 에이전트 시스템 구조도
-
-```mermaid
+  - 7.0점 미만: fail 등급
 - **선정 전략**: 
   1. S_total 최우선 (pass 등급 우선)
   2. 동점 시 처리 속도 고려 (80% 점수 + 20% 속도)
-- **산출**: `judge_report.json`, 최종 선택 리포트
-
-#### 4단계: 리포트 생성
-- **judge_report.json**: 상세 평가 내역 (페이지별 결과 포함)
-- **page_level_results_YYYYMMDD_HHMMSS.csv**: 페이지별 상세 결과
-  - 파일명, 페이지 번호
-  - OCR/전략, 텍스트 미리보기
-  - 유효성 Pass/Fail
-  - LLM Judge 점수 (S_read, S_sent, S_noise, S_table, S_total)
-  - 처리 시간, 추출 비용(USD), 폴백 경로
-  - 페이지별 최선 선택 (1/0)
-- **final_selection_YYYYMMDD_HHMMSS.csv**: 문서별 최종 선택 전략
-- **타임스탬프**: 실행마다 고유한 파일명으로 저장되어 이전 결과 보존
+- **산출**: 최종 선택된 최적 전략 + 자동 리포트 생성
+  - `judge_report.json`: 상세 평가 내역
+  - `page_level_results_YYYYMMDD_HHMMSS.csv`: 페이지별 결과
+  - `final_selection_YYYYMMDD_HHMMSS.csv`: 최종 선택 전략
 
 ---
 
@@ -250,9 +219,16 @@ graph TB
   - 7.0점 미만: fail 등급
 - **선정 전략**: S_total 최우선 → 동점 시 처리 속도 고려
 
-### 4. 리포트 생성 (Report Generator)
+### 4. 자동 리포트 생성
+3단계 완료 후 평가 결과가 자동으로 리포트 파일로 저장됩니다:
 - **judge_report.json**: 상세 평가 내역 (페이지별 결과 포함)
 - **page_level_results_YYYYMMDD_HHMMSS.csv**: 페이지별 상세 결과
+  - 파일명, 페이지 번호
+  - OCR/전략, 텍스트 미리보기
+  - 유효성 Pass/Fail
+  - LLM Judge 점수 (S_read, S_sent, S_noise, S_table, S_total)
+  - 처리 시간, 추출 비용(USD), 폴백 경로
+  - 페이지별 최선 선택 (1/0)
 - **final_selection_YYYYMMDD_HHMMSS.csv**: 문서별 최종 선택 전략
 - **타임스탬프**: 실행마다 고유한 파일명으로 저장되어 이전 결과 보존
 
@@ -273,7 +249,7 @@ agentserver/
 │   ├── basic_extraction_agent.py    # 다중 도구 추출
 │   ├── validation_agent.py          # LLM 검증 + 폴백
 │   ├── judge_agent.py               # LLM 품질 평가
-│   └── report_generator.py          # 리포트 생성
+│   └── report_generator.py          # 자동 리포트 생성 (유틸리티)
 ├── tools/
 │   ├── pdfplumber_tool.py           # PDFPlumber 추출
 │   ├── pdfminer_tool.py             # PDFMiner 추출
@@ -359,7 +335,7 @@ python main.py --input data/input/example.pdf
 3. 페이지별 LLM 검증 (Pass/Fail)
 4. Fail 페이지에 대해 폴백 도구 적용 및 재검증
 5. Pass된 페이지에 대해 LLM Judge 품질 평가
-6. 최종 전략 선택 및 리포트 생성
+6. 최종 전략 자동 선택 및 리포트 생성
 
 ---
 
